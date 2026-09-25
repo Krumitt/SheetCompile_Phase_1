@@ -99,3 +99,607 @@ Phase 2 (Python/pandas code generation) and Phase 3 (SQL code generation,
 backend-selection heuristic, benchmarking) are **not** implemented here —
 that is the defined Phase 1/Phase 2/Phase 3 boundary from the project
 proposal, and this repository intentionally does not cross it yet.
+
+
+
+# SheetCompile - Phase 2
+
+**A Spreadsheet-to-Code Compiler for Translating Excel Formula Logic into
+Scalable Python and SQL Implementations**
+
+Phase 2 = Semantic Analysis, Intermediate Representation, and Python Code
+Generation. This phase extends the Phase 1 front end with a static type-checking
+pass, a backend-agnostic Three-Address Code (TAC) intermediate representation,
+and a Python/pandas code generator that consumes the IR and emits executable,
+vectorized target code. The IR is the strict boundary between the front end and
+all backends: no backend module touches the AST, the symbol table, or the
+dependency graph directly.
+
+---
+
+## Project structure
+
+```
+sheetcompile/
+├── language_spec.py       # token types + EBNF grammar + SUPPORTED_FUNCTIONS
+├── extractor.py           # reads .xlsx via openpyxl -> raw formulas/values
+├── lexer.py               # formula string -> token stream
+├── ast_nodes.py           # AST node classes + pretty_print()
+├── parser.py              # token stream -> AST (recursive descent)
+├── symbol_table.py        # tracks cell refs, named ranges, cross-sheet refs
+├── dependency_graph.py    # cycle detection + topological evaluation order
+├── evaluator.py           # tree-walking reference evaluator (Phase 1 baseline)
+├── error_reporter.py      # unified diagnostic format + exception hierarchy
+│
+├── semantic_analyzer.py   # [NEW Phase 2A] type inference + TypedSymbolTable
+├── ir_generator.py        # [NEW Phase 2B] AST -> TAC quadruples (IR)
+├── code_generator.py      # [NEW Phase 2B] TAC quadruples -> Python/pandas source
+├── demo_runner.py         # [NEW Phase 2B] interactive pipeline demo (CLI)
+│
+├── main.py                # wires the whole pipeline together, CLI entry point
+├── requirements.txt
+└── tests/
+    ├── create_test_workbooks.py   # generates the 3 sample workbooks
+    ├── expected_values.py         # hand-computed correctness baseline
+    ├── test_pipeline.py           # Phase 1 pipeline: 16/16 pass/fail report
+    └── workbooks/
+        ├── pricing.xlsx
+        ├── payroll.xlsx
+        └── inventory.xlsx
+```
+
+The four Phase 1 modules that are **unchanged** in Phase 2: `language_spec.py`,
+`extractor.py`, `evaluator.py`, and `error_reporter.py`. The remaining Phase 1
+modules (`lexer.py`, `parser.py`, `ast_nodes.py`, `symbol_table.py`,
+`dependency_graph.py`, `main.py`) are also unchanged. Phase 2 was developed
+without modifying any Phase 1 module, which confirms that the front-end/back-end
+separation is real: adding a new backend requires writing one new file, not
+editing existing ones.
+
+---
+
+## Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+`requirements.txt` adds `pandas` and `numpy` to the Phase 1 dependency on
+`openpyxl`. The code generator emits `import pandas as pd` and
+`import numpy as np` at the top of every generated file, so both packages must
+be present to execute the generated code.
+
+---
+
+## Run the Phase 1 test suite (unchanged)
+
+```bash
+python tests/create_test_workbooks.py   # generates pricing/payroll/inventory .xlsx
+python tests/test_pipeline.py           # full pipeline, prints pass/fail
+```
+
+Expected: `16/16 checks passed`.
+
+---
+
+## Run the Phase 2 self-tests (new)
+
+Each Phase 2 module contains its own self-test suite that runs in isolation
+without a real .xlsx workbook. Run them directly:
+
+```bash
+python semantic_analyzer.py   # 11/11 checks: type inference + error detection
+python ir_generator.py        # 12/12 checks: TAC correctness + formatting
+```
+
+Combined with the 16 Phase 1 pipeline tests, Phase 2 is backed by **39
+automated checks** across the full pipeline from formula string to generated
+Python code.
+
+---
+
+## Run the interactive demo
+
+```bash
+python demo_runner.py
+```
+
+Compiles five representative formulas one at a time, printing the token stream,
+AST, symbol table state, TAC quadruples (in both human-readable and raw-quadruple
+form), and the final generated Python code for each formula. Press Enter to
+advance to the next formula. Output is color-coded by compilation phase.
+
+The five formulas demonstrated:
+
+```
+=A1+B1                       simple arithmetic
+=SUM(A1:A5)                  aggregate function with range argument
+=IF(C1>100, 1, 0)            conditional logic
+=VLOOKUP(D1, A1:B10, 2, FALSE)   lookup function
+=(A1*B1)-(C1/D1)^2           operator precedence and nesting
+```
+
+---
+
+## Run the CLI on any workbook
+
+```bash
+python main.py tests/workbooks/pricing.xlsx
+```
+
+Prints every cell's evaluated value as `Sheet!Cell = value`. The CLI entry
+point runs the full Phase 2 pipeline (extract -> lex -> parse -> semantic
+analysis -> dependency graph -> IR generation -> code generation) and also
+prints the generated `execute_compiled_sheet(df)` function to stdout.
+
+---
+
+## Compiler-design concept map (for Review 2 / viva)
+
+| Course concept | Module | What it demonstrates |
+|---|---|---|
+| Lexical analysis | `lexer.py` | Hand-written scanning-loop tokenizer; reports illegal characters, malformed numbers, unterminated strings with position |
+| Language specification | `language_spec.py` | Formal token list + EBNF grammar with documented operator precedence |
+| Syntax analysis / parsing | `parser.py` | Hand-written recursive-descent parser, one method per grammar rule |
+| Abstract Syntax Tree | `ast_nodes.py` | Typed AST node classes + `pretty_print()` visualization |
+| Symbol table management | `symbol_table.py` | Tracks cell refs, named ranges, cross-sheet refs |
+| Dependency / data-flow analysis | `dependency_graph.py` | DFS-based 3-colour cycle detection + topological sort |
+| **Semantic analysis** | **`semantic_analyzer.py`** | **Visitor-pattern type checker; TypedSymbolTable; static detection of type mismatches, scope violations, argument-count errors before evaluation** |
+| **Intermediate representation** | **`ir_generator.py`** | **TAC quadruple generation; PARAM/CALL calling convention; globally unique temporaries; named-range resolution via TypedSymbolTable** |
+| **Target code generation** | **`code_generator.py`** | **Quadruple-to-pandas translation; PARAM buffer + CALL drain; common subexpression elimination (CSE)** |
+| Error detection and reporting | `error_reporter.py` | Unified diagnostic format: `Error at Sheet!Cell, position N: message` |
+
+---
+
+## Phase 2 pipeline in full
+
+The complete seven-stage pipeline:
+
+```
+.xlsx file
+    |
+    v
+[extractor.py]          reads formulas, values, layout via openpyxl
+    |                   -> ExtractedWorkbook
+    v
+[lexer.py + parser.py]  tokenize and parse each formula string
+    |                   -> dict: (sheet, cell) -> AST root
+    v
+[dependency_graph.py]   build workbook-wide dependency DAG
+    |                   -> DependencyGraph; topological order list
+    v
+[semantic_analyzer.py]  walk every AST in topological order; infer types
+    |                   -> TypedSymbolTable with one Type per cell
+    |                   -> SemanticErrors accumulated in ErrorReport
+    v
+[ir_generator.py]       lower every formula AST to TAC quadruples
+    |                   -> IRGenerator; flat list of Quadruple objects
+    |                   -> dict: (sheet, cell) -> that cell's instruction slice
+    v
+[code_generator.py]     iterate the flat quadruple list; emit pandas source
+    |                   -> execute_compiled_sheet(df) as a Python string
+    v
+[evaluator.py]          Phase 1 reference evaluator (correctness baseline)
+                        -> compare against generated code output cell by cell
+```
+
+Stages 1-4 are fully unchanged from Phase 1. Stages 5-7 are new in Phase 2.
+
+---
+
+## Module reference
+
+### semantic_analyzer.py
+
+**Compiler-design concept:** Semantic analysis, type inference, static scope
+checking.
+
+Phase 1's `evaluator.py` discovers a type mismatch only when it executes the
+offending formula and encounters an unexpected value mid-evaluation.
+`semantic_analyzer.py` catches the same class of errors without executing
+anything, in a dedicated pass before code generation.
+
+**Type lattice** (five types, no subtype hierarchy):
+
+| Type | Assigned to |
+|---|---|
+| `NUMBER` | Numeric literals, arithmetic results, aggregate function results |
+| `STRING` | Text literals, `&` concatenation results, string function results |
+| `BOOLEAN` | `TRUE`/`FALSE` literals, comparison results, logical function results |
+| `RANGE` | Multi-cell references (`A1:A10`, named ranges spanning multiple cells) |
+| `UNKNOWN` | Forward references, `VLOOKUP`/`INDEX` results, cells not yet analyzed |
+
+`UNKNOWN` is accepted wherever any other type is expected ("benefit of the
+doubt"), consistent with how a compiler handles unresolved generic types. This
+keeps the analyzer sound without rejecting legitimate formulas it cannot
+statically prove safe in one pass.
+
+**`TypedSymbolTable`** extends Phase 1's `SymbolTable` through Python
+inheritance (no overrides of inherited methods). It adds:
+
+- `set_type(sheet, cell, type)` - records the inferred type after a cell is analyzed
+- `get_type(sheet, cell) -> Type` - returns the cell's type, or `UNKNOWN` for cells not yet analyzed
+- `resolve_named_range_type(name) -> Type` - returns `RANGE` for multi-cell aliases, or the underlying cell's type for single-cell aliases
+
+**`SemanticAnalyzer`** is a Visitor over `ast_nodes.py`'s node classes.
+Dispatch is table-driven (a `dict` keyed on `type(node)`), so every node class
+has exactly one handler. This is the textbook Visitor pattern, and is
+deliberately structured differently from `evaluator.py`'s `isinstance` chain so
+the two passes are easy to distinguish.
+
+**`FUNCTION_SIGNATURES`** catalogues all 28 supported functions as
+`(min_args, max_args, category)`. Categories and their type rules:
+
+| Category | Functions | Rule |
+|---|---|---|
+| `NUMERIC_AGGREGATE` | `SUM`, `AVERAGE`, `MIN`, `MAX` | All args must be `NUMBER`, `BOOLEAN`, `RANGE`, or `UNKNOWN`; returns `NUMBER` |
+| `COUNT_LIKE` | `COUNT`, `COUNTA` | Accepts any argument type; returns `NUMBER` |
+| `CRITERIA_AGGREGATE` | `COUNTIF`, `SUMIF`, `SUMIFS` | First arg must be `RANGE`; `SUMIFS` requires odd total arg count; returns `NUMBER` |
+| `CONDITIONAL` | `IF`, `IFS` | `IF` condition must not be `RANGE`; result type is join of branch types |
+| `LOGICAL` | `AND`, `OR`, `NOT` | All args must be `NUMBER`, `BOOLEAN`, or `UNKNOWN`; returns `BOOLEAN` |
+| `LOOKUP` | `VLOOKUP`, `HLOOKUP`, `INDEX`, `MATCH` | Table/range arg must be a `RangeNode`; returns `UNKNOWN` (data-dependent) |
+| `STRING_FN` | `CONCAT`, `CONCATENATE`, `TEXT`, `LEFT`, `RIGHT`, `MID`, `TRIM` | Returns `STRING` |
+| `ERROR_HANDLING` | `IFERROR`, `ISERROR` | `IFERROR` returns join of both args; `ISERROR` returns `BOOLEAN` |
+| `DATE_FN` | `DATEDIF` | Returns `NUMBER` |
+
+**`analyze_workbook(wb, asts, symtab, order, errors)`** is the driver. It
+mirrors `main.py`'s evaluate loop: it walks cells in topological order so that
+by the time a formula references another cell, that cell's type has already been
+recorded. A `SemanticError` in one cell sets its type to `UNKNOWN` and continues
+- one bad cell does not block the rest of the workbook.
+
+**Errors caught statically** (examples that Phase 1 would only catch at
+runtime):
+
+```python
+=A2+1          # where A2 holds text   -> SemanticError: '+' expects numeric operands
+=SUM("abc", 1) # text literal in SUM   -> SemanticError: SUM() expects numeric values
+=NOT(A1, A2)   # wrong arg count       -> SemanticError: NOT expects 1 argument(s), got 2
+=VLOOKUP(A1, A2, 1)   # scalar table   -> SemanticError: VLOOKUP()'s table/range argument must be a range
+=IF(A1:A5, 1, 0)      # range as cond  -> SemanticError: IF's condition cannot be a whole range
+=TaxRate*2     # undeclared name       -> SemanticError: undefined named range 'TaxRate'
+=OtherSheet!A1 # unknown sheet         -> SemanticError: reference to undefined sheet 'OtherSheet'
+```
+
+**Self-test** (run `python semantic_analyzer.py`):
+
+```
+[PASS] arithmetic over a numeric cell -> NUMBER
+[PASS] '&' concatenation -> STRING
+[PASS] SUM() over a range -> NUMBER
+[PASS] named range resolves to underlying type
+[PASS] IF() with differing branch types -> UNKNOWN
+[PASS] arithmetic on text cell is rejected
+[PASS] SUM() over a text literal is rejected
+[PASS] undefined named range is rejected
+[PASS] undefined function is rejected
+[PASS] wrong argument count is rejected
+[PASS] VLOOKUP with non-range table arg is rejected
+11/11 checks passed
+```
+
+---
+
+### ir_generator.py
+
+**Compiler-design concept:** Intermediate code generation; Three-Address Code
+(TAC); quadruple representation (Dragon Book, Chapter 6).
+
+**`Quadruple`** is a single TAC instruction stored as four named slots:
+`(op, arg1, arg2, result)`. It is a class rather than a bare tuple so it can
+print itself in two forms without external logic:
+
+- `format_tac()` - human-readable: `t1 = A1 + A2`
+- `format_quad()` - raw quadruple: `(+, A1, A2, t1)`
+
+Both representations are printed side by side in the IR dump.
+
+**Op-codes:**
+
+| Op-code | Meaning | arg1 | arg2 | result |
+|---|---|---|---|---|
+| `+` `-` `*` `/` `^` `&` `=` `<>` `<` `>` `<=` `>=` | Binary Excel operator (used verbatim as op-code) | Left operand | Right operand | New temporary |
+| `UMINUS` | Unary negation | Operand | `-` | New temporary |
+| `PARAM` | Push one call argument (left to right) | Argument | `-` | `-` |
+| `CALL` | Invoke a named function | Function name | Argument count | New temporary |
+| `ASSIGN` | Bind the final temporary back to the cell name | Last temporary | `-` | Cell label (e.g. `B3`) |
+
+Binary Excel operators are used verbatim as op-codes rather than mapped to
+`ADD`, `MUL`, etc. This makes the IR readable by anyone familiar with the source
+language and lets the code generator forward the op-code directly to Python
+without a translation table. `PARAM`+`CALL` is the standard TAC calling
+convention for functions of arbitrary arity: a flat `(op, arg1, arg2, result)`
+tuple cannot express a call with four or more arguments in a single instruction.
+
+**`IRGenerator`** is a Visitor over `ast_nodes.py`'s node classes, structured
+identically to `SemanticAnalyzer` (dispatch via `type(node)` dict). Lowering
+rules by node type:
+
+- `NumberNode`, `StringNode`, `BooleanNode` - returns the literal value as a string operand; no instruction emitted
+- `CellRefNode` - returns the cell address as a string operand, sheet-qualified only if it differs from the current cell's sheet; no instruction emitted
+- `RangeNode` - returns the range string (e.g. `A1:A10` or `Sheet2!B1:B20`) as a string operand; no instruction emitted
+- `NamedRangeNode` - if a `TypedSymbolTable` was supplied, resolves to the concrete cell or range address; otherwise keeps the symbolic name; no instruction emitted
+- `UnaryOpNode('-')` - visits operand, allocates new temporary, emits `(UMINUS, operand, -, temp)`, returns `temp`
+- `BinaryOpNode` - visits left and right (each may emit further instructions), allocates new temporary, emits `(op, left, right, temp)`, returns `temp`
+- `FunctionCallNode` - visits all arguments left to right, emits one `(PARAM, arg, -, -)` per argument, allocates new temporary, emits `(CALL, funcname, argcount, temp)`, returns `temp`
+
+After visiting the root node, `generate_cell()` appends one final
+`(ASSIGN, last_temp, -, cell_label)` instruction. This `ASSIGN` is the hook
+the code generator uses to emit the pandas write-back (`df.at[row, col] = temp`).
+
+**Temporary naming:** Temporaries are numbered `t1, t2, t3, ...` by a single
+counter shared across the entire `IRGenerator` instance and never reset between
+cells. This guarantees global uniqueness across the workbook, which is a
+correctness requirement: if two cells shared a temporary name, the code
+generator would emit conflicting Python variable assignments and any subsequent
+dataflow analysis would compute incorrect results.
+
+**Named-range resolution:** When a `TypedSymbolTable` is supplied (the normal
+case in the integrated pipeline), `NamedRangeNode` is resolved to the concrete
+cell or range the name points to. The IR produced this way contains no symbolic
+aliases that a backend would need to re-resolve. Without a symbol table (e.g.
+in isolated unit tests), the name itself is kept as a symbolic operand - still
+valid TAC, just not yet address-bound.
+
+**`generate_workbook_ir(asts, order, symtab=None)`** is the driver. It creates
+one `IRGenerator` instance and calls `generate_cell()` for each formula cell in
+topological order, appending each cell's quadruples to the shared flat list.
+Returns `(generator, cell_instructions)` where `generator.instructions` is the
+full flat program and `cell_instructions` is a `dict: (sheet, cell) -> list[Quadruple]`
+mapping each cell to its own slice.
+
+**`print_ir(instructions, title=None)`** prints one labelled block of
+instructions with both the TAC line and the raw quadruple side by side:
+
+```
+  1: t1 = A1 > 5                  (>, A1, 5, t1)
+  2: PARAM t1                     (PARAM, t1, -, -)
+  3: PARAM "big"                  (PARAM, "big", -, -)
+  4: PARAM "small"                (PARAM, "small", -, -)
+  5: t2 = CALL IF, 3              (CALL, IF, 3, t2)
+  6: Z1 = t2                      (ASSIGN, t2, -, Z1)
+```
+
+**Self-test** (run `python ir_generator.py`). The suite first prints human-readable
+TAC for six representative formulas (`=A1+A2`, `=(A1+A2)*B1`, `=-A1`,
+`=SUM(A1:A10)`, `=IF(A1>5,"big","small")`, `=VLOOKUP(A1,B1:C10,2,FALSE)`),
+then runs 12 correctness checks:
+
+```
+[PASS] binary op -> one op quadruple + ASSIGN
+[PASS] temporaries are unique and increasing
+[PASS] precedence reflected in instruction order
+[PASS] unary '-' uses UMINUS op-code
+[PASS] function call -> PARAM(s) then CALL
+[PASS] multi-arg call emits one PARAM per argument
+[PASS] IF() branches lower as CALL arguments
+[PASS] final instruction ASSIGNs back to the cell
+[PASS] named range resolves via symbol table
+[PASS] named range w/o symtab keeps symbolic name
+[PASS] temp counter is shared across cells
+[PASS] quadruple + TAC string formatting
+12/12 checks passed
+```
+
+---
+
+### code_generator.py
+
+**Compiler-design concept:** Target code synthesis; common subexpression
+elimination (CSE).
+
+**`CodeGenerator(ir_quadruples, input_dataframe_name="df")`** takes the flat
+quadruple list produced by `IRGenerator` and emits a self-contained Python
+function `execute_compiled_sheet(df)`. The function begins with a type guard,
+contains one or more pandas/NumPy statements per quadruple, and ends with
+`return df`. The output is a Python string that can be written to a `.py` file
+and imported directly into any pandas pipeline.
+
+**Op-code to pandas translation:**
+
+| IR op-code | Generated Python / pandas | Notes |
+|---|---|---|
+| `+` `-` `*` | `arg1 OP arg2` | Direct arithmetic; works on scalars and Series |
+| `/` | `np.where(arg2 == 0, np.nan, arg1 / arg2)` | Safe division: zero denominator returns `NaN` instead of raising `ZeroDivisionError` |
+| `^` | `(arg1) ** (arg2)` | Python exponentiation; parentheses protect against negative-base precedence |
+| `UMINUS` | `-arg1` | Unary negation |
+| `PARAM` | *(buffered in `pending_params` list)* | Not emitted until the matching `CALL` is seen |
+| `CALL SUM` | `sum([args])` with Series handling | Phase 3 will replace this with `df[col].sum()` for full vectorization |
+| `CALL <other>` | `FUNCNAME(args)` | Passed through as a Python function call |
+| `ASSIGN` (cell ref e.g. `B3`) | `df.at[row_idx, 'B'] = last_temp` | Row index is cell row minus 1 (0-based); column letter extracted from cell address |
+| `ASSIGN` (column-only) | `df['col'] = last_temp` | Used when no specific row can be determined |
+
+**`PARAM` buffer / `CALL` drain:** The generator maintains a `pending_params`
+list. Each `PARAM` quadruple appends its argument string. When a `CALL`
+quadruple is encountered, the generator drains exactly `arg2` arguments from the
+end of the buffer to form the function call. This exactly reverses the
+`PARAM`-then-`CALL` calling convention that the IR generator used to emit them,
+and correctly handles nested calls because inner calls drain their arguments
+before the outer call's `CALL` instruction is reached.
+
+**Common Subexpression Elimination (CSE):** The generator maintains an
+`expression_cache` dict keyed on `f"{op}:{arg1}:{arg2}"`. Before emitting a
+computation, it checks whether the same triple has already been computed. If so,
+it emits a comment (`# OPTIMIZATION: Reusing cached computation for ...`) and
+assigns the previously computed temporary to the new result name instead of
+re-emitting the operation. CSE is not applied to `ASSIGN`, `PARAM`, or `CALL`
+instructions (side effects). In practice this eliminates redundant computation
+when the same sub-formula appears in multiple cells.
+
+**Example - two cells sharing a sub-expression (`=A1+A2` in B2, `=(A1+A2)*B1` in C2):**
+
+```python
+import pandas as pd
+import numpy as np
+
+def execute_compiled_sheet(df):
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError('Input must be a pandas DataFrame')
+
+    t1 = A1 + A2
+    df.at[1, 'B'] = t1
+    # OPTIMIZATION: Reusing cached computation for +:A1:A2
+    t3 = t1
+    t4 = t3 * B1
+    df.at[1, 'C'] = t4
+    return df
+```
+
+**`write_to_file(filename="compiled_output.py")`** writes the generated source
+to disk and prints a confirmation message.
+
+---
+
+### demo_runner.py
+
+**Purpose:** Interactive end-to-end demonstration of the full Phase 2 pipeline
+for five representative formulas. Intended for viva demonstrations and manual
+inspection of intermediate outputs.
+
+For each formula, the runner prints (color-coded by phase):
+
+1. `[Phase 1] Lexer` - token list from `Lexer.tokenize()`
+2. `[Phase 2] Parser` - AST from `Parser.parse()`
+3. `[Phase 3] Semantic Analyzer` - symbol table state from `SemanticAnalyzer.analyze()`
+4. `[Phase 4] IR Generator` - TAC lines from `IRGenerator.generate_cell()` formatted with `format_tac()`
+5. `[Phase 5] Target Code Generator` - final Python source from `CodeGenerator.generate()`
+
+If any phase raises an exception, the runner catches it, prints the error type
+and message with a traceback, and stops processing that formula. Press Enter to
+advance to the next formula.
+
+---
+
+## Why an Intermediate Representation
+
+A naive approach would translate AST nodes directly into pandas statements inside
+the parser or evaluator. This creates tight coupling: adding a SQL backend would
+require forking the entire translation logic. SheetCompile avoids this by
+inserting a backend-agnostic IR between the front end and all backends.
+
+The IR also preserves dependency order implicitly. The quadruple list is built in
+topological sequence, so the code generator iterates it once, left to right, and
+emits correct code without re-solving the dependency graph. No backend ever needs
+to touch `dependency_graph.py`.
+
+The design was informed by the Dragon Book's treatment of TAC and by inspecting
+LLVM's IR (which is SSA-form TAC) as a production example. SheetCompile's IR is
+non-SSA because Excel formulas are pure expressions with no control flow, so SSA
+construction (which requires a control-flow graph) is not needed for this phase.
+
+---
+
+## Semantic analysis vs. Phase 1 evaluation: what changes
+
+| Behavior | Phase 1 (`evaluator.py`) | Phase 2 (`semantic_analyzer.py`) |
+|---|---|---|
+| When errors are found | At runtime, mid-evaluation | Statically, before any code is generated |
+| What triggers a type error | Executing `SUM()` and encountering text | Walking the AST and seeing a `STRING` type where `NUMBER` is expected |
+| Scope checking | Not performed | Reference to undefined sheet or named range is caught here |
+| Argument count checking | Checked at call time inside the evaluator | Checked against `FUNCTION_SIGNATURES` before visiting any argument |
+| What happens after an error in one cell | Evaluation stops for that cell; pipeline may halt | `SemanticError` added to `ErrorReport`; cell type set to `UNKNOWN`; analysis continues |
+
+---
+
+## IR output format reference
+
+Every `print_ir()` call produces a numbered table with both representations:
+
+```
+index: TAC line (left-aligned, padded)    (op, arg1, arg2, result)
+```
+
+Example for `=SUM(A1:A10)` in cell `Z1`:
+
+```
+  1: PARAM A1:A10               (PARAM, A1:A10, -, -)
+  2: t1 = CALL SUM, 1           (CALL, SUM, 1, t1)
+  3: Z1 = t1                    (ASSIGN, t1, -, Z1)
+```
+
+Example for `=(A1+A2)*B1` in cell `Z1`:
+
+```
+  1: t1 = A1 + A2               (+, A1, A2, t1)
+  2: t2 = t1 * B1               (*, t1, B1, t2)
+  3: Z1 = t2                    (ASSIGN, t2, -, Z1)
+```
+
+The index column is 1-based. The TAC column is padded to align the raw quadruple
+column. The raw quadruple uses `-` for `None` slots.
+
+---
+
+## Known Phase 2 limitations (documented honestly, on purpose)
+
+- **Whole-workbook cycle halt inherited from Phase 1.** If any cell in the
+  workbook has a circular reference, IR generation halts for the entire workbook,
+  including cells unrelated to the cycle. Real Excel still computes the
+  unrelated cells. Per-SCC cycle isolation is planned for Phase 3.
+
+- **`SUM` lowered to scalar `sum()`, not `df[col].sum()`.** The code generator
+  emits `sum([args])` for `CALL SUM` rather than a vectorized pandas column
+  aggregation. This is correct for scalar arguments but does not produce
+  vectorized code for large DataFrames. Full range-aware pandas mapping is
+  planned for Phase 3.
+
+- **Unsupported `CALL` functions passed through raw.** Functions outside the
+  28-function supported subset are emitted as raw Python function calls
+  (e.g. `HLOOKUP(...)`). At runtime this raises a `NameError` unless the caller
+  has defined a matching Python function. A complete function library mapping is
+  planned for Phase 3.
+
+- **Comparison operators emitted verbatim.** The code generator currently emits
+  `=` and `<>` rather than their Python equivalents `==` and `!=`. The generated
+  code raises a `SyntaxError` if executed as-is. An operator normalization pass
+  is planned for Phase 3.
+
+- **No automated correctness diff in the integrated pipeline.** The Phase 1
+  reference evaluator and the generated code are not yet automatically diffed
+  cell-by-cell in the integrated pipeline. Correctness is verified only through
+  the 12-check `ir_generator.py` self-test and manual inspection of `demo_runner.py`
+  output. A diff validator against reference evaluator output is planned for Phase 3.
+
+- **No Excel-cached values in the generated test workbooks.** Inherited from
+  Phase 1. `pricing.xlsx`, `payroll.xlsx`, and `inventory.xlsx` are generated by
+  `openpyxl`, which does not evaluate formulas. `extractor.py` already reads
+  cached values from real Excel/LibreOffice files for when real-world workbooks
+  are used in Phase 3.
+
+---
+
+## Phase 3 roadmap
+
+**Python backend completion:**
+- Full vectorized pandas mapping for range-based function calls (`SUM` -> `df[col].sum()`, `AVERAGE` -> `df[col].mean()`, `MIN`/`MAX` -> `df[col].min()`/`.max()`, `COUNTIF` with apply)
+- Comparison operator normalization (`=` -> `==`, `<>` -> `!=`) in the code generator output
+- Per-SCC cycle isolation so unaffected cells are still compiled when a cycle exists elsewhere in the workbook
+- Automated cell-by-cell diff between reference evaluator output and the DataFrame returned by `execute_compiled_sheet(df)`
+
+**SQL backend:**
+- `sql_generator.py` consuming the same quadruple list produced by `ir_generator.py`
+- Aggregates -> `GROUP BY`; conditionals -> `CASE WHEN`; lookups -> `JOIN`s; inter-cell dependencies -> CTEs
+- Automatic backend-selection heuristic: aggregate-heavy and set-based formulas route to SQL; row-wise and procedural formulas route to Python
+
+**Benchmarking:**
+- Performance comparison: generated Python (pandas) vs. generated SQL vs. native Excel evaluation at 10,000, 100,000, and 1,000,000 rows
+- Correctness regression suite covering deeply nested conditionals, cross-sheet lookups, `SUMIFS` with multiple criteria ranges, and mixed-type aggregates
+
+---
+
+## Scope boundary
+
+Phase 2 stops at Python code generation and the self-test suites. The SQL
+backend (`sql_generator.py`), the automatic backend-selection heuristic, the
+correctness diff validator, and all benchmarking are **not** implemented here -
+that is the defined Phase 2/Phase 3 boundary from the project proposal, and this
+repository intentionally does not cross it yet.
+
+Phase 1 stops at the reference evaluator and correctness baseline. Phase 2 was
+implemented without crossing back into Phase 1 modules.
+
+---
+
+
